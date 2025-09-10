@@ -8,10 +8,11 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css">
 <style>
   :root{--ring:#e5e7eb;--bg:#fff;--text:#0f172a;--muted:#64748b;
-        --blue:#3b82f6;--green:#22c55e;--cyan:#06b6d4;--amber:#f59e0b;--red:#ef4444;--slate:#374151}
+        --blue:#3b82f6;--green:#22c55e;--amber:#f59e0b;--red:#ef4444}
   *{box-sizing:border-box}
-  body{margin:0;background:#fff;color:#0f172a;font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial}
+  body{margin:0;background:#fff;color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Arial}
   .app{display:grid;grid-template-columns:1fr 320px;gap:16px;min-height:100vh;padding:16px}
+
   header{grid-column:1/-1;display:flex;gap:10px;align-items:center;border:1px solid var(--ring);border-radius:12px;background:#fff;padding:10px 12px}
   .spacer{flex:1}
   .btn,.input,textarea,select{border:1px solid var(--ring);border-radius:10px;background:#fff;padding:8px 10px}
@@ -43,6 +44,7 @@
   .status-inprogress{background:var(--amber)}
   .status-completed{background:var(--green)}
   .status-cancelled{background:var(--red)}
+  .tiny{display:block;font-weight:600;opacity:.8;font-size:12px}
 
   .muted{color:#64748b}
   #loading{font-size:12px;color:#64748b;margin-left:8px}
@@ -74,16 +76,16 @@
     <span id="loading"></span>
   </header>
 
-  <!-- Filters: Machine, SKU, Status -->
+  <!-- Filters -->
   <div class="filters">
     <label>Machine</label>
-    <select id="filtMa" class="input" style="min-width:160px"><option value="__ALL__">All</option></select>
+    <select id="filtMa" class="input" style="min-width:140px"><option value="__ALL__">All</option></select>
 
     <label>SKU</label>
-    <select id="filtSku" class="input" style="min-width:160px"><option value="__ALL__">All</option></select>
+    <select id="filtSku" class="input" style="min-width:140px"><option value="__ALL__">All</option></select>
 
     <label>Status</label>
-    <select id="filtSt" class="input" style="min-width:160px">
+    <select id="filtSt" class="input" style="min-width:140px">
       <option value="__ALL__">All</option>
       <option>Planned</option>
       <option>In-Progress</option>
@@ -121,8 +123,8 @@
         <input id="fId" class="input" type="text" placeholder="WO-0001">
       </div>
       <div>
-        <label>SKU</label>
-        <input id="fSKU" class="input" type="text" placeholder="SKU / Part number">
+        <label>WO Date</label>
+        <input id="fDate" class="input" type="date">
       </div>
 
       <div class="row-full">
@@ -139,15 +141,16 @@
         <input id="fMachine" class="input" type="text" placeholder="e.g., LATHE-02">
       </div>
       <div>
-        <label>Priority</label>
-        <select id="fPriority" class="input">
-          <option value="1">1</option>
-          <option value="2" selected>2</option>
-          <option value="3">3</option>
-          <option value="4">4</option>
-        </select>
+        <label>SKU</label>
+        <input id="fSKU" class="input" type="text" placeholder="e.g., PART-123">
       </div>
 
+      <div>
+        <label>Priority (1–4)</label>
+        <select id="fPriority" class="input">
+          <option>1</option><option selected>2</option><option>3</option><option>4</option>
+        </select>
+      </div>
       <div>
         <label>Status</label>
         <select id="fStatus" class="input">
@@ -157,11 +160,11 @@
           <option>Cancelled</option>
         </select>
       </div>
+
       <div>
         <label>Quantity</label>
         <input id="fQty" class="input" type="number" min="0" step="1" placeholder="0">
       </div>
-
       <div class="row-full">
         <label>Notes</label>
         <textarea id="fNotes" class="input" rows="2" placeholder="Optional"></textarea>
@@ -183,12 +186,12 @@ var API_BASE  = ORIGIN + "/api";
 var DEVICE_ID = "991cf500-661a-11f0-90f1-775fee303094";
 var JWT       = new URLSearchParams(location.search).get("token")  || "";
 
-// Attribute flags with WO_ prefix
-var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";
-var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";   // exact spelling
-var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp";
+// Flags for WO flows
+var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";      // on create
+var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";   // on update/cancel
+var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp"; // base ts to update (original row ts)
 
-// Telemetry keys for Work Orders (has WO_Date)
+// Telemetry keys
 var KEYS = [
   "WO_Id","WO_Operators","WO_Machine","WO_SKU",
   "WO_Priority","WO_Status","WO_Quantity","WO_Notes","WO_Date"
@@ -211,12 +214,25 @@ function colorByStatus(s){
   if (v==="completed") return "status-completed";
   return "status-planned";
 }
+function yyyymmddToMs(s){
+  if(!s) return null;
+  var [Y,M,D] = s.split("-").map(Number);
+  var d = new Date(Y, (M-1), D, 0, 0, 0, 0);
+  return d.getTime();
+}
+function msToYyyyMmDd(ms){
+  var d = new Date(ms);
+  var Y = d.getFullYear();
+  var M = String(d.getMonth()+1).padStart(2,"0");
+  var D = String(d.getDate()).padStart(2,"0");
+  return Y+"-"+M+"-"+D;
+}
 function eventContent(arg){
   var p = arg.event.extendedProps;
-  var title = p.WO_SKU || p.WO_Id || "WO";
-  return { html: '<span>'+escapeHtml(title)+'</span>' };
+  var sku = p.WO_SKU || "WO";
+  var id  = p.WO_Id  || "";
+  return { html: '<span>'+escapeHtml(sku)+(id?(' — '+escapeHtml(id)):'')+'</span>' };
 }
-function toMidnightMs(d){ var x = new Date(d); x.setHours(0,0,0,0); return x.getTime(); }
 
 /************ READ ************/
 function readRange(rangeStart, rangeEnd){
@@ -237,16 +253,19 @@ function readRange(rangeStart, rangeEnd){
           rec[k] = p.value;
         });
       });
+
       var out = [];
       Object.keys(map).forEach(tsStr => {
         var r = map[tsStr];
-        var st = Number(r.WO_Date || r.ts);
-        if (!st) return;
+        var day = Number(r.WO_Date || r.ts);
+        if (!day) return;
+        var st = new Date(day), en = new Date(day + 24*60*60*1000 - 1);
         var title = String(r.WO_SKU || r.WO_Id || "WO");
         out.push({
           id: "ts-"+r.ts,
           title: title,
-          start: new Date(st),
+          start: st,
+          end:   en,
           allDay: true,
           classNames: ["event", colorByStatus(r.WO_Status)],
           extendedProps: {
@@ -254,11 +273,11 @@ function readRange(rangeStart, rangeEnd){
             WO_Operators: r.WO_Operators || "",
             WO_Machine: r.WO_Machine || "",
             WO_SKU: r.WO_SKU || "",
-            WO_Priority: r.WO_Priority != null ? r.WO_Priority : "",
+            WO_Priority: r.WO_Priority || "2",
             WO_Status: r.WO_Status || "Planned",
             WO_Quantity: r.WO_Quantity || "",
             WO_Notes: r.WO_Notes || "",
-            WO_Date: st,
+            WO_Date: day,
             __ts: r.ts
           }
         });
@@ -268,7 +287,7 @@ function readRange(rangeStart, rangeEnd){
     });
 }
 
-/************ FILTERS (Machine, SKU, Status) ************/
+/************ FILTERS ************/
 function populateFilters(events){
   var mas = new Set(), skus = new Set(), sts = new Set();
   events.forEach(ev=>{
@@ -290,9 +309,9 @@ function applyFilters(events){
   state.filters = { ma, sku, st };
   return events.filter(ev=>{
     var p = ev.extendedProps||{};
-    var okMa = (ma==="__ALL__" || String(p.WO_Machine)===ma);
-    var okSku= (sku==="__ALL__" || String(p.WO_SKU)===sku);
-    var okSt = (st==="__ALL__" || String(p.WO_Status)===st);
+    var okMa  = (ma==="__ALL__"  || String(p.WO_Machine)===ma);
+    var okSku = (sku==="__ALL__" || String(p.WO_SKU)===sku);
+    var okSt  = (st==="__ALL__"  || String(p.WO_Status)===st);
     return okMa && okSku && okSt;
   });
 }
@@ -311,24 +330,42 @@ $("#btnResetFilters").addEventListener("click", function(){
 /************ AUTO-REFRESH (5s, 3 min max) ************/
 var _autoTimer=null,_autoDeadline=0;
 function stopAutoRefresh(){ if(_autoTimer){clearInterval(_autoTimer);_autoTimer=null;} }
-/* hint:
-   - { mode:'create', woId?:string, woDate?:number, sku?:string, machine?:string }
-   - { mode:'update', updateTs:number }
-*/
-function startAutoRefresh(hint, predicate){
+
+/* Final hard reload + optional reselect */
+function hardRefreshAndReselect(tsToSelect){
+  if (!state.lastRange) return Promise.resolve();
+  return readRange(state.lastRange.start, state.lastRange.end)
+    .then(function(events){
+      state.lastEventsFull = events.slice();
+      populateFilters(events);
+      var filtered = applyFilters(events);
+      state.calendar.removeAllEvents();
+      state.calendar.addEventSource(filtered);
+      loading("Loaded "+filtered.length+" work orders — updated ✓");
+
+      if (tsToSelect != null){
+        var found = filtered.find(ev => String(ev.extendedProps.__ts) === String(tsToSelect))
+                 || events.find(ev => String(ev.extendedProps.__ts) === String(tsToSelect));
+        if (found){
+          // If WO_Date moved to another month, jump there
+          if (found.extendedProps && found.extendedProps.WO_Date){
+            var d = new Date(found.extendedProps.WO_Date);
+            state.calendar.gotoDate(d);
+          }
+          // Show fresh details
+          showDetails(found);
+        } else {
+          // If not in filtered set, clear details
+          $("#details").className="empty"; $("#details").textContent="Select a work order";
+          $("#sideActions").style.display="none";
+        }
+      }
+    })
+    .catch(function(err){ console.error(err); loading("Reload error: "+(err.message||err)); });
+}
+
+function startAutoRefresh(expectedTs, predicate){
   stopAutoRefresh(); _autoDeadline = Date.now() + 3*60*1000;
-  function normalize(s){ return String(s||"").trim(); }
-  function matchCreated(ev, h){
-    var p = ev.extendedProps||{};
-    if (h.woId && normalize(p.WO_Id) === normalize(h.woId)) return true;
-    if (h.sku && h.woDate!=null){
-      var skuOk  = normalize(p.WO_SKU) === normalize(h.sku);
-      var dateOk = Number(p.WO_Date||0) === Number(h.woDate);
-      var machOk = !h.machine || normalize(p.WO_Machine) === normalize(h.machine);
-      if (skuOk && dateOk && machOk) return true;
-    }
-    return false;
-  }
   _autoTimer = setInterval(function(){
     if (Date.now()>_autoDeadline){ stopAutoRefresh(); loading("Stopped: timeout waiting for telemetry update"); return; }
     if (!state.lastRange) return;
@@ -341,18 +378,20 @@ function startAutoRefresh(hint, predicate){
         $("#details").className="empty"; $("#details").textContent="Select a work order"; $("#sideActions").style.display="none";
         loading("Loaded "+filtered.length+" work orders — auto-refreshing…");
 
-        let found = null;
-        if (hint && hint.mode === "update" && hint.updateTs != null){
-          found = events.find(ev => String(ev.extendedProps.__ts) === String(hint.updateTs));
-        } else if (hint && hint.mode === "create"){
-          found = events.find(ev => matchCreated(ev, hint));
-        }
-        if (found){
-          if (typeof predicate==="function"){
-            try{ if (predicate(found)) { stopAutoRefresh(); loading(hint && hint.mode==="create" ? "Created ✓" : "Update detected ✓"); } }
-            catch(e){}
-          } else {
-            stopAutoRefresh(); loading(hint && hint.mode==="create" ? "Created ✓" : "Update detected ✓");
+        if (expectedTs!=null){
+          var found = events.find(ev => String(ev.extendedProps.__ts) === String(expectedTs));
+          if (found){
+            if (typeof predicate==="function"){
+              let ok=false;
+              try{ ok = !!predicate(found); }catch(e){ ok=false; }
+              if (ok){
+                stopAutoRefresh();
+                hardRefreshAndReselect(expectedTs); // << final reload + select
+              }
+            } else {
+              stopAutoRefresh();
+              hardRefreshAndReselect(expectedTs);   // << final reload + select
+            }
           }
         }
       })
@@ -369,7 +408,7 @@ function writeAttributes(payload, opts){
     WO_Operators: payload.WO_Operators,
     WO_Machine:   payload.WO_Machine,
     WO_SKU:       payload.WO_SKU,
-    WO_Priority:  payload.WO_Priority != null ? Number(payload.WO_Priority) : "",
+    WO_Priority:  payload.WO_Priority || "2",
     WO_Status:    payload.WO_Status || "Planned",
     WO_Quantity:  payload.WO_Quantity || "",
     WO_Notes:     payload.WO_Notes || "",
@@ -385,14 +424,13 @@ function writeAttributes(payload, opts){
     method:"POST",
     headers:{ "X-Authorization":"Bearer "+JWT, "Content-Type":"application/json" },
     body: JSON.stringify(body)
-  }).then(res=>res.ok?null:res.text().then(t=>{throw new Error("Attribute write failed: "+t);}));
+  }).then(res=>res.ok?null:res.text().then(t=>{throw new Error("Attribute write failed: "+t);})); 
 }
 
 /************ DETAILS ************/
 function showDetails(ev){
   state.selectedEvent = ev;
   var p = ev.extendedProps;
-  function fmtDate(v){ if(!v) return "-"; var d=new Date(Number(v)); return d.toDateString(); }
   $("#details").className = "";
   $("#details").innerHTML =
     '<div class="kpi">'+
@@ -404,7 +442,7 @@ function showDetails(ev){
       '<span>Priority</span><span>'+escapeHtml(p.WO_Priority||"-")+'</span>'+
       '<span>Status</span><span>'+escapeHtml(p.WO_Status||"Planned")+'</span>'+
       '<span>Quantity</span><span>'+escapeHtml(p.WO_Quantity||"-")+'</span>'+
-      '<span>WO Date</span><span>'+fmtDate(p.WO_Date)+'</span>'+
+      '<span>WO Date</span><span>'+escapeHtml(new Date(p.WO_Date).toDateString())+'</span>'+
       '<span>Notes</span><span>'+escapeHtml(p.WO_Notes||"-")+'</span>'+
     '</div>';
   $("#sideActions").style.display = "flex";
@@ -413,7 +451,7 @@ function showDetails(ev){
 /************ MODAL + OPERATORS CHIPS ************/
 var overlay = $("#overlay");
 function busy(on){
-  ["saveSession","btnCancel","btnEdit","btnNew"].forEach(id=>{ var el=$( "#"+id ); if(el) el.disabled=!!on;});
+  ["saveSession","btnCancel","btnEdit","btnNew"].forEach(id=>{ var el=$("#"+id); if(el) el.disabled=!!on;});
 }
 function refreshOpChips(){
   var box=$("#opChips"); box.innerHTML=""; state.operators.forEach(function(name,idx){
@@ -432,7 +470,6 @@ $("#addOpBtn").addEventListener("click", addOneOperator);
 $("#opOne").addEventListener("keydown", function(e){ if (e.key==="Enter"){ e.preventDefault(); addOneOperator(); } });
 
 $("#closeModal").addEventListener("click", function(){ overlay.style.display="none"; });
-
 $("#btnNew").addEventListener("click", function(){ openModalForDate(new Date()); });
 
 $("#saveSession").addEventListener("click", function(){
@@ -445,14 +482,15 @@ $("#btnEdit").addEventListener("click", function(){
   var p = state.selectedEvent.extendedProps;
   state.mode="update"; $("#modalTitle").textContent="Update work order"; $("#saveSession").textContent="Update";
 
-  var base = new Date(p.WO_Date || state.selectedEvent.start);
-  state.clickedDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  var d = new Date(p.WO_Date);
+  state.clickedDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  $("#fDate").value = msToYyyyMmDd(p.WO_Date);
 
   $("#fId").value   = p.WO_Id || "";
-  $("#fSKU").value  = p.WO_SKU || "";
   state.operators   = (p.WO_Operators||"").split(",").map(s=>s.trim()).filter(Boolean);
   refreshOpChips(); $("#opOne").value="";
   $("#fMachine").value  = p.WO_Machine || "";
+  $("#fSKU").value      = p.WO_SKU || "";
   $("#fPriority").value = String(p.WO_Priority || "2");
   $("#fStatus").value   = p.WO_Status || "Planned";
   $("#fQty").value      = p.WO_Quantity || "";
@@ -472,18 +510,18 @@ $("#btnCancel").addEventListener("click", function(){
     WO_Operators: p.WO_Operators || "",
     WO_Machine: p.WO_Machine || "",
     WO_SKU: p.WO_SKU || "",
-    WO_Priority: p.WO_Priority || "2",
+    WO_Priority: String(p.WO_Priority || "2"),
     WO_Status: "Cancelled",
     WO_Quantity: p.WO_Quantity || "",
     WO_Notes: p.WO_Notes || "",
-    WO_Date: p.WO_Date || toMidnightMs(new Date())
+    WO_Date: p.WO_Date
   };
   payload[ATTR_WO_UPDATE_TS] = p.__ts;
 
   loading("Cancelling…"); busy(true);
   writeAttributes(payload, { mode:"cancel" })
     .then(function(){
-      startAutoRefresh({ mode:'update', updateTs: payload[ATTR_WO_UPDATE_TS] }, function(found){
+      startAutoRefresh(payload[ATTR_WO_UPDATE_TS], function(found){
         return String(found.extendedProps.WO_Status).toLowerCase()==="cancelled";
       });
     })
@@ -496,14 +534,18 @@ function openModalForDate(jsDate){
   state.mode="create";
   state.clickedDate = new Date(jsDate.getFullYear(), jsDate.getMonth(), jsDate.getDate());
   $("#modalTitle").textContent="Add work order"; $("#saveSession").textContent="Save";
+  $("#fDate").value = msToYyyyMmDd(state.clickedDate.getTime());
   $("#fDateHint").textContent = "Date: " + state.clickedDate.toDateString();
-  $("#fId").value=""; $("#fSKU").value="";
-  state.operators=[]; refreshOpChips(); $("#opOne").value="";
-  $("#fMachine").value=""; $("#fPriority").value="2";
-  $("#fStatus").value="Planned"; $("#fQty").value=""; $("#fNotes").value="";
+
+  $("#fId").value=""; state.operators=[]; refreshOpChips(); $("#opOne").value="";
+  $("#fMachine").value=""; $("#fSKU").value="";
+  $("#fPriority").value="2"; $("#fStatus").value="Planned";
+  $("#fQty").value=""; $("#fNotes").value="";
   overlay.style.display="flex";
 }
+
 function collectPayload(){
+  var dayMs = yyyymmddToMs($("#fDate").value);
   return {
     WO_Id: ($("#fId").value||"").trim(),
     WO_Operators: state.operators.join(", "),
@@ -513,20 +555,22 @@ function collectPayload(){
     WO_Status: $("#fStatus").value || "Planned",
     WO_Quantity: ($("#fQty").value||"").trim(),
     WO_Notes: ($("#fNotes").value||"").trim(),
-    WO_Date: toMidnightMs(state.clickedDate || new Date())
+    WO_Date: dayMs
   };
 }
+
 function validatePayload(p){
   var must = [
     ["WO ID", p.WO_Id],
     ["SKU", p.WO_SKU],
     ["At least one operator", p.WO_Operators],
-    ["Machine", p.WO_Machine]
+    ["Machine", p.WO_Machine],
+    ["WO Date", p.WO_Date]
   ];
   for (var i=0;i<must.length;i++){ if(!must[i][1]) return "Please enter "+must[i][0]; }
-  if (!/^[1-4]$/.test(String(p.WO_Priority))) return "Priority must be 1, 2, 3 or 4.";
   return "";
 }
+
 function onCreate(){
   var payload = collectPayload();
   var err = validatePayload(payload); if (err){ alert(err); return; }
@@ -535,17 +579,13 @@ function onCreate(){
   writeAttributes(payload, { mode:"create" })
     .then(function(){
       overlay.style.display="none";
-      startAutoRefresh({
-        mode: 'create',
-        woId: payload.WO_Id,
-        woDate: payload.WO_Date,
-        sku: payload.WO_SKU,
-        machine: payload.WO_Machine
-      }, null);
+      // Poll keyed to WO_Date's ts row (RC mirrors on BASE ts; if you mirror on WO_Date as ts, keep this)
+      startAutoRefresh(payload.WO_Date, null);
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to save"); })
     .finally(function(){ busy(false); });
 }
+
 function onUpdate(){
   if(!state.selectedEvent || !state.selectedEvent.extendedProps){ alert("No work order selected for update."); return; }
   var payload = collectPayload();
@@ -560,16 +600,18 @@ function onUpdate(){
   writeAttributes(payload, { mode:"update" })
     .then(function(){
       overlay.style.display="none";
-      startAutoRefresh({ mode:'update', updateTs: payload[ATTR_WO_UPDATE_TS] }, function(found){
+      // Stop when the original row (base ts) reflects the new values, then do a final hard reload
+      startAutoRefresh(payload[ATTR_WO_UPDATE_TS], function(found){
         var p = found.extendedProps || {};
-        var skuOk = String(p.WO_SKU||"") === String(payload.WO_SKU||"");
-        var stOk  = String(p.WO_Status||"") === String(payload.WO_Status||"");
-        var priOk = String(p.WO_Priority||"") === String(Number(payload.WO_Priority));
-        var qtyOk = String(p.WO_Quantity||"") === String(payload.WO_Quantity||"");
-        var dateOk= Number(p.WO_Date||0) === Number(payload.WO_Date||0);
-        var machOk= String(p.WO_Machine||"") === String(payload.WO_Machine||"");
-        var opsOk = String(p.WO_Operators||"") === String(payload.WO_Operators||"");
-        return skuOk && stOk && priOk && qtyOk && dateOk && machOk && opsOk;
+        return String(p.WO_Id||"")        === String(payload.WO_Id||"") &&
+               String(p.WO_SKU||"")       === String(payload.WO_SKU||"") &&
+               String(p.WO_Operators||"") === String(payload.WO_Operators||"") &&
+               String(p.WO_Machine||"")   === String(payload.WO_Machine||"") &&
+               String(p.WO_Status||"")    === String(payload.WO_Status||"") &&
+               String(p.WO_Priority||"")  === String(payload.WO_Priority||"") &&
+               Number(p.WO_Date||0)       === Number(payload.WO_Date||0) &&
+               String(p.WO_Quantity||"")  === String(payload.WO_Quantity||"") &&
+               String(p.WO_Notes||"")     === String(payload.WO_Notes||"");
       });
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to update"); })
@@ -594,7 +636,6 @@ function startCalendar(){
     eventContent: eventContent,
     dateClick: function(info){ openModalForDate(info.date); },
     eventClick: function(info){ showDetails(info.event); },
-    displayEventTime: false,
     datesSet: function(info){
       loading("Loading…");
       state.lastRange = { start: info.start, end: info.end };
