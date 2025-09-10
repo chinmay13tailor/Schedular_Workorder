@@ -123,8 +123,8 @@
         <input id="fId" class="input" type="text" placeholder="WO-0001">
       </div>
       <div>
-        <label>Job</label>
-        <input id="fJob" class="input" type="text" placeholder="Job/Part name">
+        <label>SKU</label>
+        <input id="fSKU" class="input" type="text" placeholder="SKU / Part number">
       </div>
 
       <div class="row-full">
@@ -143,17 +143,11 @@
       <div>
         <label>Priority</label>
         <select id="fPriority" class="input">
-          <option>Low</option><option selected>Medium</option><option>High</option>
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
         </select>
-      </div>
-
-      <div>
-        <label>Start</label>
-        <input id="fTimeStart" class="input" type="time" value="09:00">
-      </div>
-      <div>
-        <label>End</label>
-        <input id="fTimeEnd" class="input" type="time" value="11:00">
       </div>
 
       <div>
@@ -196,9 +190,9 @@ var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";      // on create
 var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";   // on update/cancel (exact spelling)
 var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp"; // base ts to update (on update/cancel)
 
-// Telemetry keys for Work Orders
+// Telemetry keys for Work Orders (no WO_Start/WO_End, and WO_SKU instead of WO_Job)
 var KEYS = [
-  "WO_Id","WO_Operators","WO_Start","WO_End","WO_Machine","WO_Job",
+  "WO_Id","WO_Operators","WO_Machine","WO_SKU",
   "WO_Priority","WO_Status","WO_Quantity","WO_Notes"
 ];
 
@@ -211,11 +205,6 @@ var state = {
   filters: { op:"__ALL__", ma:"__ALL__", st:"__ALL__" },
   lastEventsFull: []
 };
-function mergeDateTime(baseDate, hhmm){
-  var parts = String(hhmm||"00:00").split(":"); var h = parseInt(parts[0]||"0",10), m = parseInt(parts[1]||"0",10);
-  var d = new Date(baseDate); d.setHours(h||0, m||0, 0, 0); return d.getTime();
-}
-function msToHHMM(ms){ var d = new Date(ms); return String(d.getHours()).padStart(2,'0') + ":" + String(d.getMinutes()).padStart(2,'0'); }
 function escapeHtml(s){ return String(s||"").replace(/[&<>\"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 function colorByStatus(s){
   var v = String(s||"Planned").toLowerCase();
@@ -231,8 +220,8 @@ function fmtTimeFull(ms){
 }
 function eventContent(arg){
   var p = arg.event.extendedProps;
-  var time  = fmtTimeFull(p.WO_Start);
-  var title = p.WO_Job || p.WO_Id || "WO";
+  var time  = fmtTimeFull(arg.event.start.getTime());
+  var title = p.WO_SKU || p.WO_Id || "WO";
   return { html: '<span>'+escapeHtml(time)+' — '+escapeHtml(title)+'</span>' };
 }
 
@@ -258,10 +247,9 @@ function readRange(rangeStart, rangeEnd){
       var out = [];
       Object.keys(map).forEach(tsStr => {
         var r = map[tsStr];
-        var st = Number(r.WO_Start || r.ts);
-        var en = Number(r.WO_End || (st+60*60*1000));
-        if (!st || !en) return;
-        var title = String(r.WO_Job || r.WO_Id || "WO");
+        var st = Number(r.ts);                 // anchor at telemetry ts
+        var en = st + 60*60*1000;              // display as 60 min block
+        var title = String(r.WO_SKU || r.WO_Id || "WO");
         out.push({
           id: "ts-"+r.ts,
           title: title,
@@ -271,11 +259,9 @@ function readRange(rangeStart, rangeEnd){
           extendedProps: {
             WO_Id: r.WO_Id || "",
             WO_Operators: r.WO_Operators || "",
-            WO_Start: st,
-            WO_End: en,
             WO_Machine: r.WO_Machine || "",
-            WO_Job: r.WO_Job || "",
-            WO_Priority: r.WO_Priority || "Medium",
+            WO_SKU: r.WO_SKU || "",
+            WO_Priority: r.WO_Priority != null ? r.WO_Priority : "",
             WO_Status: r.WO_Status || "Planned",
             WO_Quantity: r.WO_Quantity || "",
             WO_Notes: r.WO_Notes || "",
@@ -333,7 +319,7 @@ $("#btnResetFilters").addEventListener("click", function(){
 /************ AUTO-REFRESH (5s, 3 min max) ************/
 var _autoTimer=null,_autoDeadline=0;
 function stopAutoRefresh(){ if(_autoTimer){clearInterval(_autoTimer);_autoTimer=null;} }
-function startAutoRefresh(expectedTs, predicate){
+function startAutoRefresh(expectedKeyOrTs, predicate){
   stopAutoRefresh(); _autoDeadline = Date.now() + 3*60*1000;
   _autoTimer = setInterval(function(){
     if (Date.now()>_autoDeadline){ stopAutoRefresh(); loading("Stopped: timeout waiting for telemetry update"); return; }
@@ -346,11 +332,22 @@ function startAutoRefresh(expectedTs, predicate){
         state.calendar.removeAllEvents(); state.calendar.addEventSource(filtered);
         $("#details").className="empty"; $("#details").textContent="Select a work order"; $("#sideActions").style.display="none";
         loading("Loaded "+filtered.length+" work orders — auto-refreshing…");
-        if (expectedTs!=null){
-          var found = events.find(ev => String(ev.extendedProps.__ts) === String(expectedTs));
-          if (found){
-            if (typeof predicate==="function"){ try{ if(predicate(found)){ stopAutoRefresh(); loading("Update detected ✓"); } }catch(e){} }
-            else { stopAutoRefresh(); loading("Update detected ✓"); }
+
+        // Matcher:
+        var found = null;
+        if (typeof expectedKeyOrTs === "string") {
+          // treat as WO_Id to match newly created row
+          found = events.find(ev => String(ev.extendedProps.WO_Id) === expectedKeyOrTs);
+        } else if (expectedKeyOrTs != null) {
+          // treat as ts to match updates
+          found = events.find(ev => String(ev.extendedProps.__ts) === String(expectedKeyOrTs));
+        }
+
+        if (found){
+          if (typeof predicate==="function"){
+            try{ if (predicate(found)) { stopAutoRefresh(); loading("Update detected ✓"); } }catch(e){}
+          } else {
+            stopAutoRefresh(); loading("Update detected ✓");
           }
         }
       })
@@ -365,11 +362,9 @@ function writeAttributes(payload, opts){
   var body = {
     WO_Id:        payload.WO_Id,
     WO_Operators: payload.WO_Operators,
-    WO_Start:     payload.WO_Start,
-    WO_End:       payload.WO_End,
     WO_Machine:   payload.WO_Machine,
-    WO_Job:       payload.WO_Job,
-    WO_Priority:  payload.WO_Priority || "Medium",
+    WO_SKU:       payload.WO_SKU,
+    WO_Priority:  payload.WO_Priority != null ? Number(payload.WO_Priority) : "",
     WO_Status:    payload.WO_Status || "Planned",
     WO_Quantity:  payload.WO_Quantity || "",
     WO_Notes:     payload.WO_Notes || ""
@@ -390,20 +385,20 @@ function writeAttributes(payload, opts){
 /************ DETAILS ************/
 function showDetails(ev){
   state.selectedEvent = ev;
-  var p = ev.extendedProps; function fmt(v){ return v?new Date(Number(v)).toLocaleString():"-"; }
+  var p = ev.extendedProps;
+  function fmt(v){ return v?new Date(Number(v)).toLocaleString():"-"; }
   $("#details").className = "";
   $("#details").innerHTML =
     '<div class="kpi">'+
       '<span>Base ts</span><span>'+escapeHtml(String(p.__ts||"-"))+'</span>'+
       '<span>WO ID</span><span>'+escapeHtml(p.WO_Id||"-")+'</span>'+
-      '<span>Job</span><span>'+escapeHtml(p.WO_Job||"-")+'</span>'+
+      '<span>SKU</span><span>'+escapeHtml(p.WO_SKU||"-")+'</span>'+
       '<span>Operators</span><span>'+escapeHtml(p.WO_Operators||"-")+'</span>'+
       '<span>Machine</span><span>'+escapeHtml(p.WO_Machine||"-")+'</span>'+
       '<span>Priority</span><span>'+escapeHtml(p.WO_Priority||"-")+'</span>'+
       '<span>Status</span><span>'+escapeHtml(p.WO_Status||"Planned")+'</span>'+
       '<span>Quantity</span><span>'+escapeHtml(p.WO_Quantity||"-")+'</span>'+
-      '<span>Start</span><span>'+fmt(p.WO_Start)+'</span>'+
-      '<span>End</span><span>'+fmt(p.WO_End)+'</span>'+
+      '<span>Scheduled</span><span>'+fmt(p.__ts)+'</span>'+
       '<span>Notes</span><span>'+escapeHtml(p.WO_Notes||"-")+'</span>'+
     '</div>';
   $("#sideActions").style.display = "flex";
@@ -446,20 +441,19 @@ $("#btnEdit").addEventListener("click", function(){
   var p = state.selectedEvent.extendedProps;
   state.mode="update"; $("#modalTitle").textContent="Update work order"; $("#saveSession").textContent="Update";
 
-  var base = new Date(p.WO_Start); state.clickedDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
+  var base = new Date(state.selectedEvent.start); // anchor date from event start (telemetry ts)
+  state.clickedDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
 
   $("#fId").value   = p.WO_Id || "";
-  $("#fJob").value  = p.WO_Job || "";
+  $("#fSKU").value  = p.WO_SKU || "";
   state.operators   = (p.WO_Operators||"").split(",").map(s=>s.trim()).filter(Boolean);
   refreshOpChips(); $("#opOne").value="";
   $("#fMachine").value  = p.WO_Machine || "";
-  $("#fPriority").value = p.WO_Priority || "Medium";
-  $("#fTimeStart").value= msToHHMM(p.WO_Start);
-  $("#fTimeEnd").value  = msToHHMM(p.WO_End);
+  $("#fPriority").value = String(p.WO_Priority || "2");
   $("#fStatus").value   = p.WO_Status || "Planned";
   $("#fQty").value      = p.WO_Quantity || "";
   $("#fNotes").value    = p.WO_Notes || "";
-  $("#fDateHint").textContent = "Date: " + state.clickedDate.toDateString();
+  $("#fDateHint").textContent = "Date (anchor): " + state.clickedDate.toDateString();
 
   overlay.style.display="flex";
 });
@@ -472,15 +466,13 @@ $("#btnCancel").addEventListener("click", function(){
   var payload = {
     WO_Id: p.WO_Id || "",
     WO_Operators: p.WO_Operators || "",
-    WO_Start: p.WO_Start, WO_End: p.WO_End,
     WO_Machine: p.WO_Machine || "",
-    WO_Job: p.WO_Job || "",
-    WO_Priority: p.WO_Priority || "Medium",
+    WO_SKU: p.WO_SKU || "",
+    WO_Priority: p.WO_Priority || "2",
     WO_Status: "Cancelled",
     WO_Quantity: p.WO_Quantity || "",
     WO_Notes: p.WO_Notes || ""
   };
-  // include WO_Update_Timestamp to retarget row in RC
   payload[ATTR_WO_UPDATE_TS] = p.__ts;
 
   loading("Cancelling…"); busy(true);
@@ -499,23 +491,21 @@ function openModalForDate(jsDate){
   state.mode="create";
   state.clickedDate = new Date(jsDate.getFullYear(), jsDate.getMonth(), jsDate.getDate());
   $("#modalTitle").textContent="Add work order"; $("#saveSession").textContent="Save";
-  $("#fDateHint").textContent = "Date: " + state.clickedDate.toDateString();
-  $("#fId").value=""; $("#fJob").value=""; state.operators=[]; refreshOpChips(); $("#opOne").value="";
-  $("#fMachine").value=""; $("#fPriority").value="Medium";
-  $("#fTimeStart").value="09:00"; $("#fTimeEnd").value="11:00";
+  $("#fDateHint").textContent = "Date (anchor): " + state.clickedDate.toDateString();
+  $("#fId").value=""; $("#fSKU").value="";
+  state.operators=[]; refreshOpChips(); $("#opOne").value="";
+  $("#fMachine").value=""; $("#fPriority").value="2";
   $("#fStatus").value="Planned"; $("#fQty").value=""; $("#fNotes").value="";
   overlay.style.display="flex";
 }
-function collectPayload(base){
+function collectPayload(){
   return {
     WO_Id: ($("#fId").value||"").trim(),
     WO_Operators: state.operators.join(", "),
-    WO_Start: mergeDateTime(base, $("#fTimeStart").value),
-    WO_End:   mergeDateTime(base, $("#fTimeEnd").value),
     WO_Machine: ($("#fMachine").value||"").trim(),
-    WO_Job: ($("#fJob").value||"").trim(),
-    WO_Priority: $("#fPriority").value||"Medium",
-    WO_Status: $("#fStatus").value||"Planned",
+    WO_SKU: ($("#fSKU").value||"").trim(),
+    WO_Priority: $("#fPriority").value || "2",
+    WO_Status: $("#fStatus").value || "Planned",
     WO_Quantity: ($("#fQty").value||"").trim(),
     WO_Notes: ($("#fNotes").value||"").trim()
   };
@@ -523,37 +513,34 @@ function collectPayload(base){
 function validatePayload(p){
   var must = [
     ["WO ID", p.WO_Id],
-    ["Job", p.WO_Job],
+    ["SKU", p.WO_SKU],
     ["At least one operator", p.WO_Operators],
     ["Machine", p.WO_Machine]
   ];
   for (var i=0;i<must.length;i++){ if(!must[i][1]) return "Please enter "+must[i][0]; }
-  if (p.WO_End <= p.WO_Start) return "End time must be after Start time.";
+  if (!/^[1-4]$/.test(String(p.WO_Priority))) return "Priority must be 1, 2, 3 or 4.";
   return "";
 }
 function onCreate(){
-  var base = state.clickedDate || new Date();
-  var payload = collectPayload(base);
+  var payload = collectPayload();
   var err = validatePayload(payload); if (err){ alert(err); return; }
 
   loading("Saving…"); busy(true);
   writeAttributes(payload, { mode:"create" })
     .then(function(){
       overlay.style.display="none";
-      // After RC writes telemetry at ts = WO_Start
-      startAutoRefresh(payload.WO_Start, null);
+      // Poll until a row with this WO_Id appears
+      startAutoRefresh(payload.WO_Id, null);
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to save"); })
     .finally(function(){ busy(false); });
 }
 function onUpdate(){
   if(!state.selectedEvent || !state.selectedEvent.extendedProps){ alert("No work order selected for update."); return; }
-  var base = state.clickedDate || new Date();
-  var payload = collectPayload(base);
+  var payload = collectPayload();
 
   var baseTs = state.selectedEvent.extendedProps.__ts;
   if(!baseTs){ alert("Missing base timestamp for update. Please reselect the event."); return; }
-  // include WO_Update_Timestamp
   payload[ATTR_WO_UPDATE_TS] = baseTs;
 
   var err = validatePayload(payload); if (err){ alert(err); return; }
@@ -566,11 +553,11 @@ function onUpdate(){
       startAutoRefresh(payload[ATTR_WO_UPDATE_TS], function(found){
         var p = found.extendedProps || {};
         var opsOk = String(p.WO_Operators||"") === String(payload.WO_Operators||"");
-        var jobOk = String(p.WO_Job||"") === String(payload.WO_Job||"");
+        var skuOk = String(p.WO_SKU||"") === String(payload.WO_SKU||"");
         var stOk  = String(p.WO_Status||"") === String(payload.WO_Status||"");
-        var sOk   = Number(p.WO_Start||0) === Number(payload.WO_Start||0);
-        var eOk   = Number(p.WO_End||0)   === Number(payload.WO_End||0);
-        return opsOk && jobOk && stOk && sOk && eOk;
+        var priOk = String(p.WO_Priority||"") === String(Number(payload.WO_Priority));
+        var qtyOk = String(p.WO_Quantity||"") === String(payload.WO_Quantity||"");
+        return opsOk && skuOk && stOk && priOk && qtyOk;
       });
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to update"); })
