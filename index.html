@@ -187,9 +187,9 @@ var DEVICE_ID = "991cf500-661a-11f0-90f1-775fee303094";
 var JWT       = new URLSearchParams(location.search).get("token")  || "";
 
 // Flags for WO flows
-var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";      // on create
-var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";   // on update/cancel
-var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp"; // base ts to update (original row ts)
+var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";
+var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";
+var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp";
 
 // Telemetry keys
 var KEYS = [
@@ -347,15 +347,12 @@ function hardRefreshAndReselect(tsToSelect){
         var found = filtered.find(ev => String(ev.extendedProps.__ts) === String(tsToSelect))
                  || events.find(ev => String(ev.extendedProps.__ts) === String(tsToSelect));
         if (found){
-          // If WO_Date moved to another month, jump there
           if (found.extendedProps && found.extendedProps.WO_Date){
             var d = new Date(found.extendedProps.WO_Date);
             state.calendar.gotoDate(d);
           }
-          // Show fresh details
           showDetails(found);
         } else {
-          // If not in filtered set, clear details
           $("#details").className="empty"; $("#details").textContent="Select a work order";
           $("#sideActions").style.display="none";
         }
@@ -364,6 +361,13 @@ function hardRefreshAndReselect(tsToSelect){
     .catch(function(err){ console.error(err); loading("Reload error: "+(err.message||err)); });
 }
 
+/**
+ * Versatile polling:
+ * - If `expectedTs` is provided: stop when an event with matching __ts is found
+ *   and (if given) `predicate(found)` returns true.
+ * - If `expectedTs` is null but `predicate` is provided: scan all events and stop
+ *   when any event satisfies `predicate(ev)`. We then hard-reload and reselect that row.
+ */
 function startAutoRefresh(expectedTs, predicate){
   stopAutoRefresh(); _autoDeadline = Date.now() + 3*60*1000;
   _autoTimer = setInterval(function(){
@@ -378,20 +382,22 @@ function startAutoRefresh(expectedTs, predicate){
         $("#details").className="empty"; $("#details").textContent="Select a work order"; $("#sideActions").style.display="none";
         loading("Loaded "+filtered.length+" work orders — auto-refreshing…");
 
-        if (expectedTs!=null){
+        if (expectedTs != null){
           var found = events.find(ev => String(ev.extendedProps.__ts) === String(expectedTs));
           if (found){
             if (typeof predicate==="function"){
-              let ok=false;
-              try{ ok = !!predicate(found); }catch(e){ ok=false; }
-              if (ok){
-                stopAutoRefresh();
-                hardRefreshAndReselect(expectedTs); // << final reload + select
-              }
-            } else {
-              stopAutoRefresh();
-              hardRefreshAndReselect(expectedTs);   // << final reload + select
-            }
+              let ok=false; try{ ok = !!predicate(found); }catch(e){ ok=false; }
+              if (ok){ stopAutoRefresh(); hardRefreshAndReselect(expectedTs); }
+            } else { stopAutoRefresh(); hardRefreshAndReselect(expectedTs); }
+          }
+        } else if (typeof predicate === "function"){
+          // CREATE: detect by matching values rather than ts
+          var matched = events.find(ev => {
+            try { return !!predicate(ev); } catch(e){ return false; }
+          });
+          if (matched){
+            stopAutoRefresh();
+            hardRefreshAndReselect(matched.extendedProps && matched.extendedProps.__ts);
           }
         }
       })
@@ -579,8 +585,14 @@ function onCreate(){
   writeAttributes(payload, { mode:"create" })
     .then(function(){
       overlay.style.display="none";
-      // Poll keyed to WO_Date's ts row (RC mirrors on BASE ts; if you mirror on WO_Date as ts, keep this)
-      startAutoRefresh(payload.WO_Date, null);
+      // CREATE: detect by values (not ts). Stop as soon as the new row is visible.
+      startAutoRefresh(null, function(ev){
+        var p = ev.extendedProps || {};
+        return String(p.WO_Id||"")      === String(payload.WO_Id||"") &&
+               Number(p.WO_Date||0)     === Number(payload.WO_Date||0) &&
+               String(p.WO_SKU||"")     === String(payload.WO_SKU||"") &&
+               String(p.WO_Machine||"") === String(payload.WO_Machine||"");
+      });
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to save"); })
     .finally(function(){ busy(false); });
@@ -600,7 +612,7 @@ function onUpdate(){
   writeAttributes(payload, { mode:"update" })
     .then(function(){
       overlay.style.display="none";
-      // Stop when the original row (base ts) reflects the new values, then do a final hard reload
+      // UPDATE: keyed to base row; stop when it reflects new values
       startAutoRefresh(payload[ATTR_WO_UPDATE_TS], function(found){
         var p = found.extendedProps || {};
         return String(p.WO_Id||"")        === String(payload.WO_Id||"") &&
