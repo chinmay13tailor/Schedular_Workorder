@@ -190,10 +190,10 @@ var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";      // on create
 var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";   // on update/cancel (exact spelling)
 var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp"; // base ts to update (on update/cancel)
 
-// Telemetry keys for Work Orders (no WO_Start/WO_End, and WO_SKU instead of WO_Job)
+// Telemetry keys for Work Orders (adds WO_Date)
 var KEYS = [
   "WO_Id","WO_Operators","WO_Machine","WO_SKU",
-  "WO_Priority","WO_Status","WO_Quantity","WO_Notes"
+  "WO_Priority","WO_Status","WO_Quantity","WO_Notes","WO_Date"
 ];
 
 /************ HELPERS ************/
@@ -213,16 +213,14 @@ function colorByStatus(s){
   if (v==="completed") return "status-completed";
   return "status-planned";
 }
-function fmtTimeFull(ms){
-  var d = new Date(ms), h = d.getHours()%12||12;
-  var ampm = d.getHours()>=12 ? "PM":"AM";
-  return String(h).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")+" "+ampm;
-}
 function eventContent(arg){
+  // No time shown; just SKU or WO Id
   var p = arg.event.extendedProps;
-  var time  = fmtTimeFull(arg.event.start.getTime());
   var title = p.WO_SKU || p.WO_Id || "WO";
-  return { html: '<span>'+escapeHtml(time)+' — '+escapeHtml(title)+'</span>' };
+  return { html: '<span>'+escapeHtml(title)+'</span>' };
+}
+function toMidnightMs(d){
+  var x = new Date(d); x.setHours(0,0,0,0); return x.getTime();
 }
 
 /************ READ ************/
@@ -247,14 +245,15 @@ function readRange(rangeStart, rangeEnd){
       var out = [];
       Object.keys(map).forEach(tsStr => {
         var r = map[tsStr];
-        var st = Number(r.ts);                 // anchor at telemetry ts
-        var en = st + 60*60*1000;              // display as 60 min block
+        // Anchor events to WO_Date (midnight). Fallback to ts if missing.
+        var st = Number(r.WO_Date || r.ts);
+        if (!st) return;
         var title = String(r.WO_SKU || r.WO_Id || "WO");
         out.push({
           id: "ts-"+r.ts,
           title: title,
           start: new Date(st),
-          end:   new Date(en),
+          allDay: true,
           classNames: ["event", colorByStatus(r.WO_Status)],
           extendedProps: {
             WO_Id: r.WO_Id || "",
@@ -265,6 +264,7 @@ function readRange(rangeStart, rangeEnd){
             WO_Status: r.WO_Status || "Planned",
             WO_Quantity: r.WO_Quantity || "",
             WO_Notes: r.WO_Notes || "",
+            WO_Date: st,
             __ts: r.ts
           }
         });
@@ -367,7 +367,8 @@ function writeAttributes(payload, opts){
     WO_Priority:  payload.WO_Priority != null ? Number(payload.WO_Priority) : "",
     WO_Status:    payload.WO_Status || "Planned",
     WO_Quantity:  payload.WO_Quantity || "",
-    WO_Notes:     payload.WO_Notes || ""
+    WO_Notes:     payload.WO_Notes || "",
+    WO_Date:      payload.WO_Date            // NEW: midnight ms of selected day
   };
   if (opts && opts.mode==="create"){
     body[ATTR_WO_SAVE_FLAG] = false; // WO_Save_Button=false
@@ -386,7 +387,7 @@ function writeAttributes(payload, opts){
 function showDetails(ev){
   state.selectedEvent = ev;
   var p = ev.extendedProps;
-  function fmt(v){ return v?new Date(Number(v)).toLocaleString():"-"; }
+  function fmtDate(v){ if(!v) return "-"; var d=new Date(Number(v)); return d.toDateString(); }
   $("#details").className = "";
   $("#details").innerHTML =
     '<div class="kpi">'+
@@ -398,7 +399,7 @@ function showDetails(ev){
       '<span>Priority</span><span>'+escapeHtml(p.WO_Priority||"-")+'</span>'+
       '<span>Status</span><span>'+escapeHtml(p.WO_Status||"Planned")+'</span>'+
       '<span>Quantity</span><span>'+escapeHtml(p.WO_Quantity||"-")+'</span>'+
-      '<span>Scheduled</span><span>'+fmt(p.__ts)+'</span>'+
+      '<span>WO Date</span><span>'+fmtDate(p.WO_Date)+'</span>'+
       '<span>Notes</span><span>'+escapeHtml(p.WO_Notes||"-")+'</span>'+
     '</div>';
   $("#sideActions").style.display = "flex";
@@ -441,7 +442,8 @@ $("#btnEdit").addEventListener("click", function(){
   var p = state.selectedEvent.extendedProps;
   state.mode="update"; $("#modalTitle").textContent="Update work order"; $("#saveSession").textContent="Update";
 
-  var base = new Date(state.selectedEvent.start); // anchor date from event start (telemetry ts)
+  // Use WO_Date for the anchor
+  var base = new Date(p.WO_Date || state.selectedEvent.start); 
   state.clickedDate = new Date(base.getFullYear(), base.getMonth(), base.getDate());
 
   $("#fId").value   = p.WO_Id || "";
@@ -453,7 +455,7 @@ $("#btnEdit").addEventListener("click", function(){
   $("#fStatus").value   = p.WO_Status || "Planned";
   $("#fQty").value      = p.WO_Quantity || "";
   $("#fNotes").value    = p.WO_Notes || "";
-  $("#fDateHint").textContent = "Date (anchor): " + state.clickedDate.toDateString();
+  $("#fDateHint").textContent = "Date: " + state.clickedDate.toDateString();
 
   overlay.style.display="flex";
 });
@@ -471,7 +473,8 @@ $("#btnCancel").addEventListener("click", function(){
     WO_Priority: p.WO_Priority || "2",
     WO_Status: "Cancelled",
     WO_Quantity: p.WO_Quantity || "",
-    WO_Notes: p.WO_Notes || ""
+    WO_Notes: p.WO_Notes || "",
+    WO_Date: p.WO_Date || toMidnightMs(new Date())
   };
   payload[ATTR_WO_UPDATE_TS] = p.__ts;
 
@@ -491,7 +494,7 @@ function openModalForDate(jsDate){
   state.mode="create";
   state.clickedDate = new Date(jsDate.getFullYear(), jsDate.getMonth(), jsDate.getDate());
   $("#modalTitle").textContent="Add work order"; $("#saveSession").textContent="Save";
-  $("#fDateHint").textContent = "Date (anchor): " + state.clickedDate.toDateString();
+  $("#fDateHint").textContent = "Date: " + state.clickedDate.toDateString();
   $("#fId").value=""; $("#fSKU").value="";
   state.operators=[]; refreshOpChips(); $("#opOne").value="";
   $("#fMachine").value=""; $("#fPriority").value="2";
@@ -507,7 +510,8 @@ function collectPayload(){
     WO_Priority: $("#fPriority").value || "2",
     WO_Status: $("#fStatus").value || "Planned",
     WO_Quantity: ($("#fQty").value||"").trim(),
-    WO_Notes: ($("#fNotes").value||"").trim()
+    WO_Notes: ($("#fNotes").value||"").trim(),
+    WO_Date: toMidnightMs(state.clickedDate || new Date())  // NEW
   };
 }
 function validatePayload(p){
@@ -557,7 +561,8 @@ function onUpdate(){
         var stOk  = String(p.WO_Status||"") === String(payload.WO_Status||"");
         var priOk = String(p.WO_Priority||"") === String(Number(payload.WO_Priority));
         var qtyOk = String(p.WO_Quantity||"") === String(payload.WO_Quantity||"");
-        return opsOk && skuOk && stOk && priOk && qtyOk;
+        var dateOk= Number(p.WO_Date||0) === Number(payload.WO_Date||0);
+        return opsOk && skuOk && stOk && priOk && qtyOk && dateOk;
       });
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to update"); })
@@ -582,6 +587,7 @@ function startCalendar(){
     eventContent: eventContent,
     dateClick: function(info){ openModalForDate(info.date); },
     eventClick: function(info){ showDetails(info.event); },
+    displayEventTime: false, // no time next to events
     datesSet: function(info){
       loading("Loading…");
       state.lastRange = { start: info.start, end: info.end };
