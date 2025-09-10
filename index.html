@@ -190,7 +190,7 @@ var ATTR_WO_SAVE_FLAG    = "WO_Save_Button";      // on create
 var ATTR_WO_UPDATE_FLAG  = "WO_Update_Buttton";   // on update/cancel (exact spelling)
 var ATTR_WO_UPDATE_TS    = "WO_Update_Timestamp"; // base ts to update (on update/cancel)
 
-// Telemetry keys for Work Orders (adds WO_Date)
+// Telemetry keys for Work Orders (has WO_Date)
 var KEYS = [
   "WO_Id","WO_Operators","WO_Machine","WO_SKU",
   "WO_Priority","WO_Status","WO_Quantity","WO_Notes","WO_Date"
@@ -319,11 +319,32 @@ $("#btnResetFilters").addEventListener("click", function(){
 /************ AUTO-REFRESH (5s, 3 min max) ************/
 var _autoTimer=null,_autoDeadline=0;
 function stopAutoRefresh(){ if(_autoTimer){clearInterval(_autoTimer);_autoTimer=null;} }
-function startAutoRefresh(expectedKeyOrTs, predicate){
+
+/* hint can be:
+   - { mode:'create', woId?:string, woDate?:number, sku?:string, machine?:string }
+   - { mode:'update', updateTs:number }
+*/
+function startAutoRefresh(hint, predicate){
   stopAutoRefresh(); _autoDeadline = Date.now() + 3*60*1000;
+
+  function normalize(s){ return String(s||"").trim(); }
+
+  function matchCreated(ev, h){
+    var p = ev.extendedProps||{};
+    if (h.woId && normalize(p.WO_Id) === normalize(h.woId)) return true;
+    if (h.sku && h.woDate!=null){
+      var skuOk  = normalize(p.WO_SKU) === normalize(h.sku);
+      var dateOk = Number(p.WO_Date||0) === Number(h.woDate);
+      var machOk = !h.machine || normalize(p.WO_Machine) === normalize(h.machine);
+      if (skuOk && dateOk && machOk) return true;
+    }
+    return false;
+  }
+
   _autoTimer = setInterval(function(){
     if (Date.now()>_autoDeadline){ stopAutoRefresh(); loading("Stopped: timeout waiting for telemetry update"); return; }
     if (!state.lastRange) return;
+
     readRange(state.lastRange.start, state.lastRange.end)
       .then(function(events){
         state.lastEventsFull = events.slice();
@@ -333,21 +354,19 @@ function startAutoRefresh(expectedKeyOrTs, predicate){
         $("#details").className="empty"; $("#details").textContent="Select a work order"; $("#sideActions").style.display="none";
         loading("Loaded "+filtered.length+" work orders — auto-refreshing…");
 
-        // Matcher:
-        var found = null;
-        if (typeof expectedKeyOrTs === "string") {
-          // treat as WO_Id to match newly created row
-          found = events.find(ev => String(ev.extendedProps.WO_Id) === expectedKeyOrTs);
-        } else if (expectedKeyOrTs != null) {
-          // treat as ts to match updates
-          found = events.find(ev => String(ev.extendedProps.__ts) === String(expectedKeyOrTs));
+        let found = null;
+        if (hint && hint.mode === "update" && hint.updateTs != null){
+          found = events.find(ev => String(ev.extendedProps.__ts) === String(hint.updateTs));
+        } else if (hint && hint.mode === "create"){
+          found = events.find(ev => matchCreated(ev, hint));
         }
 
         if (found){
           if (typeof predicate==="function"){
-            try{ if (predicate(found)) { stopAutoRefresh(); loading("Update detected ✓"); } }catch(e){}
+            try{ if (predicate(found)) { stopAutoRefresh(); loading(hint && hint.mode==="create" ? "Created ✓" : "Update detected ✓"); } }
+            catch(e){}
           } else {
-            stopAutoRefresh(); loading("Update detected ✓");
+            stopAutoRefresh(); loading(hint && hint.mode==="create" ? "Created ✓" : "Update detected ✓");
           }
         }
       })
@@ -368,13 +387,13 @@ function writeAttributes(payload, opts){
     WO_Status:    payload.WO_Status || "Planned",
     WO_Quantity:  payload.WO_Quantity || "",
     WO_Notes:     payload.WO_Notes || "",
-    WO_Date:      payload.WO_Date            // NEW: midnight ms of selected day
+    WO_Date:      payload.WO_Date
   };
   if (opts && opts.mode==="create"){
     body[ATTR_WO_SAVE_FLAG] = false; // WO_Save_Button=false
   } else if (opts && (opts.mode==="update" || opts.mode==="cancel")){
     body[ATTR_WO_UPDATE_FLAG] = true; // WO_Update_Buttton=true
-    if (payload[ATTR_WO_UPDATE_TS]) body[ATTR_WO_UPDATE_TS] = payload[ATTR_WO_UPDATE_TS]; // WO_Update_Timestamp
+    if (payload[ATTR_WO_UPDATE_TS]) body[ATTR_WO_UPDATE_TS] = payload[ATTR_WO_UPDATE_TS];
   }
   return fetch(url,{
     method:"POST",
@@ -481,7 +500,7 @@ $("#btnCancel").addEventListener("click", function(){
   loading("Cancelling…"); busy(true);
   writeAttributes(payload, { mode:"cancel" })
     .then(function(){
-      startAutoRefresh(payload[ATTR_WO_UPDATE_TS], function(found){
+      startAutoRefresh({ mode:'update', updateTs: payload[ATTR_WO_UPDATE_TS] }, function(found){
         return String(found.extendedProps.WO_Status).toLowerCase()==="cancelled";
       });
     })
@@ -511,7 +530,7 @@ function collectPayload(){
     WO_Status: $("#fStatus").value || "Planned",
     WO_Quantity: ($("#fQty").value||"").trim(),
     WO_Notes: ($("#fNotes").value||"").trim(),
-    WO_Date: toMidnightMs(state.clickedDate || new Date())  // NEW
+    WO_Date: toMidnightMs(state.clickedDate || new Date())
   };
 }
 function validatePayload(p){
@@ -533,8 +552,14 @@ function onCreate(){
   writeAttributes(payload, { mode:"create" })
     .then(function(){
       overlay.style.display="none";
-      // Poll until a row with this WO_Id appears
-      startAutoRefresh(payload.WO_Id, null);
+      // Poll until a row with this WO_Id (or SKU+Date) appears
+      startAutoRefresh({
+        mode: 'create',
+        woId: payload.WO_Id,
+        woDate: payload.WO_Date,
+        sku: payload.WO_SKU,
+        machine: payload.WO_Machine
+      }, null);
     })
     .catch(function(e){ console.error(e); alert(e.message||"Failed to save"); })
     .finally(function(){ busy(false); });
@@ -554,7 +579,7 @@ function onUpdate(){
     .then(function(){
       overlay.style.display="none";
       // Stop when the row at WO_Update_Timestamp reflects these fields
-      startAutoRefresh(payload[ATTR_WO_UPDATE_TS], function(found){
+      startAutoRefresh({ mode:'update', updateTs: payload[ATTR_WO_UPDATE_TS] }, function(found){
         var p = found.extendedProps || {};
         var opsOk = String(p.WO_Operators||"") === String(payload.WO_Operators||"");
         var skuOk = String(p.WO_SKU||"") === String(payload.WO_SKU||"");
